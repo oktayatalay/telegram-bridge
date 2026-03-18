@@ -2,3 +2,8 @@ config.env
 venv/
 __pycache__/
 *.pyc
+*.log
+active_session.txt
+pending/
+responses/
+.ai/
