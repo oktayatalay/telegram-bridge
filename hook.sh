@@ -302,15 +302,18 @@ rm -f "$RESPONSE_FILE"
 rm -f "$PENDING_FILE"
 rm -f "$BRIDGE_DIR/pending/${REQUEST_ID}.sent"
 
-# Telegram mesajını güncelle
+# Telegram mesajını güncelle (orijinal komutu + durumu göster)
 if [ -n "$MSG_ID" ]; then
-    python3 -c "
-import sys, json, urllib.request
-bridge_dir = sys.argv[1]
-msg_id = sys.argv[2]
-response = sys.argv[3]
+    HOOK_BRIDGE="$BRIDGE_DIR" HOOK_MSG_ID="$MSG_ID" HOOK_RESPONSE="$RESPONSE" HOOK_TOOL_INFO="$TOOL_INFO" \
+    python3 2>/dev/null << 'EDIT_PYEOF'
+import os, json, html, urllib.request
 
-with open(f'{bridge_dir}/config.env') as f:
+bridge_dir = os.environ['HOOK_BRIDGE']
+msg_id     = os.environ['HOOK_MSG_ID']
+response   = os.environ['HOOK_RESPONSE']
+tool_info  = os.environ.get('HOOK_TOOL_INFO', '')
+
+with open(bridge_dir + '/config.env') as f:
     config = {}
     for line in f:
         line = line.strip()
@@ -318,40 +321,40 @@ with open(f'{bridge_dir}/config.env') as f:
             k, v = line.split('=', 1)
             config[k.strip()] = v.strip()
 
-token = config['TELEGRAM_TOKEN']
+token   = config['TELEGRAM_TOKEN']
 chat_id = config['CHAT_ID']
-emoji = '✅' if response == 'allow' else '❌'
-status = 'Onaylandı' if response == 'allow' else 'Reddedildi'
-tool_info = sys.argv[4] if len(sys.argv) > 4 else ''
+emoji   = '\u2705' if response == 'allow' else '\u274c'
+status  = 'Onaylandi' if response == 'allow' else 'Reddedildi'
 
-import html as html_mod
 detail = ''
 if tool_info:
-    raw = tool_info
-    if raw.startswith('[') and ']' in raw:
-        bracket_end = raw.index(']')
-        tool_type = raw[1:bracket_end]
-        det = raw[bracket_end+2:]
+    if tool_info.startswith('[') and ']' in tool_info:
+        bi = tool_info.index(']')
+        tool_type = tool_info[1:bi]
+        det = tool_info[bi+2:]
     else:
-        tool_type, det = '?', raw
-    lines = det.split('\n')
-    detail = '\n<b>' + html_mod.escape(tool_type) + '</b>\n<pre>' + html_mod.escape('\n'.join(det_lines[:10])[:400]) + '</pre>'
+        tool_type, det = '?', tool_info
+    det_lines = det.split('\n')
+    esc_type = html.escape(tool_type)
+    esc_det  = html.escape('\n'.join(det_lines[:10])[:400])
+    detail   = '\n<b>' + esc_type + '</b>\n<pre>' + esc_det + '</pre>'
 
+text    = emoji + ' <b>' + status + '</b>' + detail
 payload = json.dumps({
     'chat_id': chat_id,
     'message_id': int(msg_id),
-    'text': f'{emoji} <b>{status}</b>{detail}',
+    'text': text,
     'parse_mode': 'HTML'
 }).encode()
 req = urllib.request.Request(
-    f'https://api.telegram.org/bot{token}/editMessageText',
+    'https://api.telegram.org/bot' + token + '/editMessageText',
     data=payload, headers={'Content-Type': 'application/json'}
 )
 try:
     urllib.request.urlopen(req, timeout=10)
 except Exception:
     pass
-" "$BRIDGE_DIR" "$MSG_ID" "$RESPONSE" 2>/dev/null
+EDIT_PYEOF
 fi
 
 if [ "$RESPONSE" = "allow" ]; then
