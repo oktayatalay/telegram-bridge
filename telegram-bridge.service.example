@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram Claude Bridge Bot Poller
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/telegram-bridge
+ExecStart=/usr/bin/python3 %h/telegram-bridge/bot_poller.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/telegram-bridge/bot.log
+StandardError=append:%h/telegram-bridge/bot.log
+
+[Install]
+WantedBy=default.target
