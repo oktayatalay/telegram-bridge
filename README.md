@@ -2,6 +2,39 @@
 
 Control and monitor your [Claude Code](https://claude.ai/code) sessions remotely via Telegram.
 
+## ⚠️ Known Issues & Limitations
+
+These are confirmed issues. Contributions welcome.
+
+### 1. tmux popup doesn't work while Claude Code is active
+**Status:** Not fixed
+When Claude Code is running interactively, its TUI takes over terminal input. The tmux `display-popup` either doesn't render visibly or can't receive keystrokes. In practice, **Telegram is the only reliable approval channel** while Claude Code is running. The popup only works if you run `claude` inside a tmux session and Claude Code is idle/waiting.
+
+### 2. Popup closes instantly if Telegram approval arrives first
+**Status:** By design, but jarring
+Both channels race. If you approve on Telegram before the popup even renders, the popup script detects the response file and exits immediately — you never see it. No fix planned; this is the intended race behavior.
+
+### 3. Only one CHAT_ID supported
+**Status:** Not fixed
+The bot only responds to a single Telegram user (configured in `config.env`). There's no multi-user or team approval flow. All approvals come from one account.
+
+### 4. No persistence across bot restarts for pending approvals
+**Status:** Partial workaround
+If `bot_poller.py` crashes while a hook is waiting, the hook will block until the 1-hour timeout. Restarting the bot alone doesn't re-send pending requests — you need to run `python3 resend_pending.py` manually.
+
+### 5. 1-hour approval timeout may be too long
+**Status:** Not fixed
+If you walk away and forget about a pending approval, Claude Code is blocked for up to 1 hour before it auto-denies. The timeout is hardcoded in `hook.sh`. Easy to change but not configurable yet.
+
+### 6. systemd user service requires lingering to survive logout
+**Status:** Known caveat
+On systems where you log out (not just close the terminal), the user service stops. Fix:
+```bash
+loginctl enable-linger $USER
+```
+
+---
+
 ## What it does
 
 - **Approval gate**: Every `Bash`, `Edit`, `Write` tool call Claude makes sends a Telegram message with **Approve / Deny** inline buttons. You can also approve from the terminal popup — whichever comes first wins.
