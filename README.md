@@ -188,6 +188,48 @@ Claude Code can read the `CLAUDE.md` in this repo and understand the full archit
 - `config.env` is `.gitignore`d — never commit real credentials.
 - Approval timeout is 1 hour — after that, the pending action is automatically denied and you get a Telegram notification.
 
+## Troubleshooting
+
+### Hook breaks itself (self-lock)
+
+**Symptom:** All Claude Code tool calls are blocked. Every `Edit`, `Write`, or `Bash` attempt shows a hook error.
+
+**Cause:** `hook.sh` has a syntax error. When bash can't parse it, it exits with code 2, which Claude Code interprets as "deny" — blocking everything including further edits to fix it.
+
+**Why this is unlikely now:** `hook.sh` automatically passes through any edits targeting files inside `~/telegram-bridge/`. So editing the bridge scripts themselves never goes through the hook.
+
+**If it still happens:**
+
+```bash
+# 1. Check if hook.sh has a syntax error
+bash -n ~/telegram-bridge/hook.sh
+
+# 2a. Restore from git (loses uncommitted changes)
+cd ~/telegram-bridge && git checkout hook.sh
+
+# 2b. Or fix the specific line from terminal (bypass Claude Code)
+python3 - << 'EOF'
+with open('/home/oktay/telegram-bridge/hook.sh') as f:
+    content = f.read()
+# inspect content, find the broken line, fix it
+print(content[content.find('# Telegram'):content.find('# Telegram')+200])
+EOF
+```
+
+### Bot poller not responding
+
+```bash
+systemctl --user status telegram-bridge
+systemctl --user restart telegram-bridge
+tail -f ~/telegram-bridge/bot.log
+```
+
+### Stuck pending approvals (after bot crash)
+
+```bash
+python3 ~/telegram-bridge/resend_pending.py
+```
+
 ## Tests
 
 ```bash

@@ -64,8 +64,7 @@ def edit_message_text(chat_id, message_id, text):
     api_call("editMessageText", {
         "chat_id": chat_id,
         "message_id": message_id,
-        "text": text,
-        "parse_mode": "HTML"
+        "text": text
     })
 
 
@@ -353,9 +352,11 @@ def process_callback_query(cq):
         emoji = "✅" if action == "allow" else "❌"
         status = "Onaylandı" if action == "allow" else "Reddedildi"
 
-        # Telegram mesajını güncelle (butonları kaldır)
+        # Telegram mesajını güncelle: durum + orijinal mesaj metni
         if message_id:
-            edit_message_text(chat_id, message_id, f"{emoji} {status}")
+            original = cq.get("message", {}).get("text", "")
+            new_text = f"{emoji} {status}\n{'─' * 19}\n{original}" if original else f"{emoji} {status}"
+            edit_message_text(chat_id, message_id, new_text[:4096])
 
         answer_callback(callback_id, status)
         print(f"[{'OK' if action == 'allow' else 'DENY'}] {request_id} {status}")

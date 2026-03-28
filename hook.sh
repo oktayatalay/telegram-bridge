@@ -8,22 +8,33 @@ BRIDGE_DIR="$HOME/telegram-bridge"
 source "$BRIDGE_DIR/config.env"
 
 # TMUX socket'i bul (Claude Code hook subprocess'ine TMUX env geçmez)
-TMUX_CMD="tmux"
-if [ -z "$TMUX" ]; then
-    TMUX_SOCK="/tmp/tmux-$(id -u)/default"
-    [ -S "$TMUX_SOCK" ] && TMUX_CMD="tmux -S $TMUX_SOCK"
+TMUX_SOCK="/tmp/tmux-$(id -u)/default"
+if [ -n "$TMUX" ]; then
+    TMUX_CMD="tmux"
+elif [ -S "$TMUX_SOCK" ]; then
+    TMUX_CMD="tmux -S $TMUX_SOCK"
+else
+    TMUX_CMD=""
 fi
 
 HOOK_DATA=$(cat)
 
 # Tool adını ve gösterim metnini çıkar
 # Read-only tool'lar için PASSTHROUGH döner → direkt exit 0
-TOOL_INFO=$(echo "$HOOK_DATA" | python3 - 2>/dev/null << 'PYEOF'
-import sys, json
+TOOL_INFO=$(HOOK_JSON="$HOOK_DATA" python3 2>/dev/null << 'PYEOF'
+import json, os
 
-d = json.load(sys.stdin)
+d = json.loads(os.environ["HOOK_JSON"])
 tool = d.get("tool_name", "")
 inp = d.get("tool_input", {})
+
+# Bridge dizinindeki dosyaları düzenlerken onay isteme (self-lock koruması)
+BRIDGE_DIR = os.path.expanduser("~/telegram-bridge")
+if tool in ("Edit", "Write", "MultiEdit"):
+    fp = inp.get("file_path", "")
+    if fp.startswith(BRIDGE_DIR):
+        print("PASSTHROUGH")
+        sys.exit(0)
 
 PASSTHROUGH = {
     "Read", "Glob", "Grep", "LS",
@@ -72,7 +83,16 @@ if [ "$TOOL_INFO" = "PASSTHROUGH" ] || [ -z "$TOOL_INFO" ]; then
     exit 0
 fi
 
-SESSION=$($TMUX_CMD display-message -p '#S' 2>/dev/null || echo "bilinmiyor")
+# Aktif session'ı bul — önce TMUX env'den, yoksa socket üzerinden en son aktif session
+if [ -n "$TMUX" ]; then
+    SESSION=$(tmux display-message -p '#S' 2>/dev/null || echo "bilinmiyor")
+elif [ -n "$TMUX_CMD" ]; then
+    SESSION=$($TMUX_CMD list-sessions -F '#{session_last_attached} #{session_name}' 2>/dev/null \
+        | sort -rn | head -1 | awk '{print $2}')
+    [ -z "$SESSION" ] && SESSION="bilinmiyor"
+else
+    SESSION="bilinmiyor"
+fi
 REQUEST_ID=$(date +%s%N)
 export REQUEST_ID
 
@@ -109,12 +129,32 @@ req_id = os.environ["REQUEST_ID"]
 with open(f"{bridge_dir}/pending/{req_id}.json") as f:
     data = json.load(f)
 
-info = data["command"][:300]
+raw = data["command"]
 session = data["session"]
 token = config["TELEGRAM_TOKEN"]
 chat_id = config["CHAT_ID"]
 
-text = f"⚠️ <b>Onay Gerekiyor</b>\nSession: {session}\n<code>{info}</code>"
+# Araç tipini ve detayı ayır: "[Bash] komut" → tip=Bash, detay=komut
+if raw.startswith("[") and "]" in raw:
+    bracket_end = raw.index("]")
+    tool_type = raw[1:bracket_end]
+    detail = raw[bracket_end+2:]  # "] " sonrası
+else:
+    tool_type = "?"
+    detail = raw
+
+import html as html_mod
+lines = detail.split("\n")
+detail_text = html_mod.escape("\n".join(lines[:20])[:800])
+
+text = (
+    f"⚠️ <b>Onay Gerekiyor</b>\n"
+    f"━━━━━━━━━━━━━━━━━━━\n"
+    f"Session : <code>{html_mod.escape(session)}</code>\n"
+    f"Araç    : <b>{html_mod.escape(tool_type)}</b>\n"
+    f"━━━━━━━━━━━━━━━━━━━\n"
+    f"<pre>{detail_text}</pre>"
+)
 keyboard = json.dumps({
     "inline_keyboard": [[
         {"text": "✅ Onayla", "callback_data": f"allow:{req_id}"},
@@ -159,36 +199,65 @@ with open(sys.argv[1], 'w') as f:
 " "$PENDING_FILE" "$MSG_ID"
 fi
 
-# tmux popup ile onay sor
-INFO_SHORT=$(echo "$TOOL_INFO" | head -c 80)
+# tmux popup için formatla
+# TOOL_INFO: "[Bash] komut" veya "[Edit] 📝 dosya\n- eski\n+ yeni"
+POPUP_TOOL="$TOOL_NAME"
+POPUP_DETAIL=$(echo "$TOOL_INFO" | sed "s/^\[$TOOL_NAME\] //")
+# Satır başına 2 boşluk ekle, maksimum 15 satır
+POPUP_BODY=$(echo "$POPUP_DETAIL" | head -15 | fold -w 76 -s | sed 's/^/  /')
 
 POPUP_SCRIPT=$(mktemp /tmp/tg_hook_XXXXXX.sh)
 RF="$RESPONSE_FILE"
 cat > "$POPUP_SCRIPT" << POPUPEOF
 #!/bin/bash
+# Ekranı bir kez çiz, döngüde temizleme
+clear
+echo "============================================================"
+echo "  ONAY GEREKIYOR"
+echo "============================================================"
+echo "  Session : $SESSION"
+echo "  Arac    : $POPUP_TOOL"
+echo "------------------------------------------------------------"
+echo ""
+echo "$POPUP_BODY"
+echo ""
+echo "------------------------------------------------------------"
+echo "  [Enter] Onayla    [Esc / n] Reddet"
+echo "============================================================"
+
+# Kullanıcı girişi veya Telegram cevabını bekle
 while [ ! -f "$RF" ]; do
-    clear
-    printf "⚠️  ONAY GEREKİYOR\n"
-    printf "Session : $SESSION\n"
-    printf "İşlem   : $INFO_SHORT\n\n"
-    printf "[y] Onayla  [n] Reddet: "
-    read -t 1 -r ans
-    if [ \$? -eq 0 ]; then
-        if [[ "\$ans" == "n" || "\$ans" == "N" || "\$ans" == "no" ]]; then
-            echo "deny" > "$RF"
-        else
+    read -s -t 1 -n1 ans
+    RC=\$?
+    if [ \$RC -eq 0 ]; then
+        if [ -z "\$ans" ]; then
+            # Enter
             echo "allow" > "$RF"
+        elif [ "\$ans" = $'\033' ] || [ "\$ans" = "n" ] || [ "\$ans" = "N" ]; then
+            # Esc veya n
+            read -s -t 0.1 -n10 2>/dev/null  # kalan escape seq'i tüket
+            echo "deny" > "$RF"
         fi
-        exit 0
     fi
 done
-printf "\nTelegram cevapladı: \$(cat $RF)\n"
+
+SONUC=\$(cat "$RF")
+echo ""
+if [ "\$SONUC" = "allow" ]; then
+    echo "  Onaylandi."
+else
+    echo "  Reddedildi."
+fi
 sleep 1
 POPUPEOF
 chmod +x "$POPUP_SCRIPT"
 
-# Popup'u aç (arka planda)
-$TMUX_CMD display-popup -w 80 -h 10 -E "bash $POPUP_SCRIPT" 2>/dev/null &
+# Popup'u aç (arka planda) — session'ı explicit hedef al
+if [ -n "$TMUX_CMD" ] && [ "$SESSION" != "bilinmiyor" ]; then
+    $TMUX_CMD display-popup -t "$SESSION" -w 90% -h 22 -E "bash $POPUP_SCRIPT" 2>/dev/null &
+elif [ -n "$TMUX_CMD" ]; then
+    $TMUX_CMD display-popup -w 90% -h 22 -E "bash $POPUP_SCRIPT" 2>/dev/null &
+fi
 
 # Hangisi önce gelirse (popup veya Telegram) onu kullan
 # inotifywait ile kernel event'i bekle — polling yok, 1 saat timeout
@@ -225,7 +294,7 @@ TIMEOUT_PYEOF
 done
 
 # Popup'u kapat ve temizle
-$TMUX_CMD display-popup -C 2>/dev/null
+[ -n "$TMUX_CMD" ] && $TMUX_CMD display-popup -C 2>/dev/null
 rm -f "$POPUP_SCRIPT"
 
 RESPONSE=$(cat "$RESPONSE_FILE")
@@ -253,11 +322,26 @@ token = config['TELEGRAM_TOKEN']
 chat_id = config['CHAT_ID']
 emoji = '✅' if response == 'allow' else '❌'
 status = 'Onaylandı' if response == 'allow' else 'Reddedildi'
+tool_info = sys.argv[4] if len(sys.argv) > 4 else ''
+
+import html as html_mod
+detail = ''
+if tool_info:
+    raw = tool_info
+    if raw.startswith('[') and ']' in raw:
+        bracket_end = raw.index(']')
+        tool_type = raw[1:bracket_end]
+        det = raw[bracket_end+2:]
+    else:
+        tool_type, det = '?', raw
+    lines = det.split('\n')
+    detail = '\n<b>' + html_mod.escape(tool_type) + '</b>\n<pre>' + html_mod.escape('\n'.join(det_lines[:10])[:400]) + '</pre>'
 
 payload = json.dumps({
     'chat_id': chat_id,
     'message_id': int(msg_id),
-    'text': f'{emoji} {status}'
+    'text': f'{emoji} <b>{status}</b>{detail}',
+    'parse_mode': 'HTML'
 }).encode()
 req = urllib.request.Request(
     f'https://api.telegram.org/bot{token}/editMessageText',
